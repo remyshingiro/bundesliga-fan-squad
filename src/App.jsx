@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Trophy, Activity, Users, Zap, CheckCircle2, Wifi } from 'lucide-react';
+import { Trophy, Activity, Users, Zap, CheckCircle2, Wifi, Radio } from 'lucide-react';
 
 const MATCH_EVENTS = [
   "Home Goal", "Away Goal", "Yellow Card", "Corner Kick",
@@ -24,6 +24,17 @@ export default function App() {
   const [feed, setFeed] = useState([]);
   const [hasBingo, setHasBingo] = useState(false);
   const [score, setScore] = useState(0);
+
+  // Helper to send score updates to AWS
+  const syncScoreToAWS = (newScore) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        action: 'syncBoard',
+        roomId: ROOM_ID,
+        score: newScore
+      }));
+    }
+  };
 
   // 1. INITIALIZE GAME & AWS CONNECTION ON LOAD
   useEffect(() => {
@@ -56,9 +67,30 @@ export default function App() {
 
     socket.onmessage = (event) => {
       const data = JSON.parse(event.data);
+      
       if (data.type === 'ROOM_SYNC') {
-        // Update leaderboard when AWS broadcasts new scores
         setLeaderboard(data.payload.players);
+      } 
+      else if (data.type === 'LIVE_MATCH_EVENT') {
+        // AWS JUST BROADCASTED A LIVE EVENT!
+        const newEvent = data.payload.event;
+        
+        // Add it to the live feed UI
+        setFeed(prev => [{ time: new Date().toLocaleTimeString(), text: `Live: ${newEvent}`, highlight: true }, ...prev]);
+        
+        // Auto-mark the board if the user has that square
+        setMarked(prevMarked => {
+          if (!prevMarked.includes(newEvent)) {
+            // Use functional state to guarantee we don't have stale score data
+            setScore(prevScore => {
+              const updatedScore = prevScore + 50;
+              syncScoreToAWS(updatedScore); // Instantly sync the new points back to AWS!
+              return updatedScore;
+            });
+            return [...prevMarked, newEvent];
+          }
+          return prevMarked;
+        });
       }
     };
 
@@ -70,18 +102,7 @@ export default function App() {
     return () => {
       if (socket) socket.close();
     };
-  }, []); // Empty dependency array means this runs exactly once when the app opens
-
-  // Helper to send score updates to AWS
-  const syncScoreToAWS = (newScore) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        action: 'syncBoard',
-        roomId: ROOM_ID,
-        score: newScore
-      }));
-    }
-  };
+  }, []); 
 
   // 2. CHECK FOR BINGO
   useEffect(() => {
@@ -96,30 +117,19 @@ export default function App() {
 
     if (isBingo) {
       setHasBingo(true);
-      const newScore = score + 500;
-      setScore(newScore);
-      syncScoreToAWS(newScore); // Push Bingo score to AWS
+      setScore(prevScore => {
+        const finalScore = prevScore + 500;
+        syncScoreToAWS(finalScore); // Push Bingo score to AWS
+        return finalScore;
+      });
       setFeed(prev => [{ time: new Date().toLocaleTimeString(), text: "🎉 BINGO! +500 PTS", highlight: true }, ...prev]);
     }
-  }, [marked, board, hasBingo, score]);
-
-  // 3. SIMULATE LIVE EVENT & SCORE POINTS
-  const simulateLiveEvent = () => {
-    const unmarkedEvents = board.filter(event => !marked.includes(event));
-    if (unmarkedEvents.length === 0) return;
-
-    const randomEvent = unmarkedEvents[Math.floor(Math.random() * unmarkedEvents.length)];
-    
-    setFeed(prev => [{ time: new Date().toLocaleTimeString(), text: `Live: ${randomEvent} occurred!`, highlight: false }, ...prev]);
-    setMarked(prev => [...prev, randomEvent]);
-    
-    const newScore = score + 50;
-    setScore(newScore);
-    syncScoreToAWS(newScore); // Push standard score to AWS
-  };
+  }, [marked, board, hasBingo]);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 p-6 font-sans">
+      
+      {/* HEADER */}
       <header className="max-w-6xl mx-auto flex items-center justify-between border-b border-slate-800 pb-6 mb-8">
         <div className="flex items-center gap-3">
           <div className="bg-blue-600 p-2 rounded-xl">
@@ -129,18 +139,21 @@ export default function App() {
             <h1 className="text-2xl font-bold tracking-tight text-white">Fan Squad</h1>
             <div className="flex items-center gap-2 text-sm text-slate-400">
               <span>Live Match Experience</span>
-              {/* Show live connection status */}
               {isConnected ? (
-                <span className="flex items-center gap-1 text-green-400 text-xs bg-green-400/10 px-2 py-0.5 rounded-full"><Wifi className="w-3 h-3"/> Connected to AWS</span>
+                <span className="flex items-center gap-1 text-green-400 text-xs bg-green-400/10 px-2 py-0.5 rounded-full">
+                  <Wifi className="w-3 h-3"/> Connected to AWS
+                </span>
               ) : (
-                <span className="flex items-center gap-1 text-red-400 text-xs bg-red-400/10 px-2 py-0.5 rounded-full"><Wifi className="w-3 h-3"/> Disconnected</span>
+                <span className="flex items-center gap-1 text-red-400 text-xs bg-red-400/10 px-2 py-0.5 rounded-full">
+                  <Wifi className="w-3 h-3"/> Disconnected
+                </span>
               )}
             </div>
           </div>
         </div>
         
         <div className="flex items-center gap-6">
-          <div className="flex items-center gap-2 bg-slate-900 px-4 py-2 rounded-full border border-slate-800">
+          <div className="flex items-center gap-2 bg-slate-900 px-4 py-2 rounded-full border border-slate-800 shadow-inner">
             <Users className="w-4 h-4 text-slate-400" />
             <span className="text-sm font-medium">Room: #{ROOM_ID}</span>
           </div>
@@ -151,17 +164,21 @@ export default function App() {
         </div>
       </header>
 
+      {/* MAIN GRID */}
       <main className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-8">
+        
+        {/* LEFT COLUMN: BINGO BOARD */}
         <div className="lg:col-span-2">
           <div className="bg-slate-900 rounded-3xl p-8 border border-slate-800 shadow-2xl relative overflow-hidden">
             
             {hasBingo && (
-              <div className="absolute inset-0 bg-blue-900/80 backdrop-blur-sm z-10 flex items-center justify-center flex-col">
+              <div className="absolute inset-0 bg-blue-900/80 backdrop-blur-sm z-10 flex items-center justify-center flex-col animate-in fade-in duration-500">
                 <Trophy className="w-24 h-24 text-yellow-400 mb-4 animate-bounce" />
                 <h2 className="text-5xl font-extrabold text-white tracking-wider drop-shadow-lg">BINGO!</h2>
+                <p className="text-blue-200 mt-2 font-medium">Squad Multiplier Activated</p>
                 <button 
                   onClick={() => { setHasBingo(false); setMarked([]); setBoard(shuffleArray(MATCH_EVENTS)); }}
-                  className="mt-6 px-6 py-3 bg-white text-blue-900 font-bold rounded-full hover:bg-blue-50 transition"
+                  className="mt-6 px-6 py-3 bg-white text-blue-900 font-bold rounded-full hover:bg-blue-50 transition shadow-lg"
                 >
                   New Card
                 </button>
@@ -171,15 +188,12 @@ export default function App() {
             <div className="flex justify-between items-end mb-6">
               <div>
                 <h2 className="text-xl font-bold text-white mb-1">Matchday Bingo</h2>
-                <p className="text-sm text-slate-400">Clicking simulate syncs to AWS.</p>
+                <p className="text-sm text-slate-400">Waiting for live match broadcast from AWS...</p>
               </div>
-              <button 
-                onClick={simulateLiveEvent}
-                className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg font-medium transition active:scale-95 shadow-lg shadow-blue-900/20"
-              >
-                <Activity className="w-4 h-4" />
-                Simulate Data Feed
-              </button>
+              <div className="flex items-center gap-2 text-blue-400 bg-blue-400/10 px-3 py-1.5 rounded-lg text-sm font-medium animate-pulse">
+                <Radio className="w-4 h-4" />
+                Listening
+              </div>
             </div>
 
             <div className="grid grid-cols-4 gap-3">
@@ -187,7 +201,7 @@ export default function App() {
                 const isMarked = marked.includes(event);
                 return (
                   <div key={index} className={`aspect-square flex flex-col items-center justify-center p-3 text-center rounded-xl border-2 transition-all duration-300 ${
-                      isMarked ? 'bg-blue-600/20 border-blue-500 text-white shadow-[0_0_15px_rgba(59,130,246,0.3)]' : 'bg-slate-950 border-slate-800 text-slate-400'
+                      isMarked ? 'bg-blue-600/20 border-blue-500 text-white shadow-[0_0_15px_rgba(59,130,246,0.3)] scale-105' : 'bg-slate-950 border-slate-800 text-slate-400'
                     }`}
                   >
                     {isMarked ? <CheckCircle2 className="w-6 h-6 text-blue-400 mb-2" /> : <div className="w-6 h-6 mb-2 opacity-10" />}
@@ -199,20 +213,44 @@ export default function App() {
           </div>
         </div>
 
+        {/* RIGHT COLUMN: FEED & LEADERBOARD */}
         <div className="space-y-6">
-          <div className="bg-slate-900 rounded-3xl p-6 border border-slate-800">
-            <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
+          
+          {/* Live Cloud Feed */}
+          <div className="bg-slate-900 rounded-3xl p-6 border border-slate-800 shadow-lg">
+            <div className="flex items-center gap-2 mb-4">
+              <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+              <h3 className="text-lg font-bold text-white">Live Match Feed</h3>
+            </div>
+            
+            <div className="space-y-3 h-48 overflow-y-auto pr-2">
+              {feed.length === 0 ? (
+                <p className="text-sm text-slate-500 italic text-center mt-10">Trigger events via Lambda Test...</p>
+              ) : (
+                feed.map((item, i) => (
+                  <div key={i} className={`p-3 rounded-lg text-sm border transition-all ${item.highlight ? 'bg-blue-500/10 border-blue-500/30 text-blue-200' : 'bg-slate-950 border-slate-800 text-slate-300'}`}>
+                    <span className="text-xs opacity-50 block mb-1 font-mono">{item.time}</span>
+                    <span className="font-semibold">{item.text}</span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          {/* Multiplayer Leaderboard */}
+          <div className="bg-slate-900 rounded-3xl p-6 border border-slate-800 shadow-lg">
+            <h3 className="text-lg font-bold mb-4 flex items-center gap-2 text-white">
               <Users className="w-5 h-5 text-blue-400" />
-              Live Squad Leaderboard
+              Live Leaderboard
             </h3>
             <div className="space-y-3">
               {leaderboard.length === 0 ? (
-                <p className="text-slate-500 text-sm">Connecting to AWS...</p>
+                <p className="text-slate-500 text-sm">Syncing room data...</p>
               ) : (
                 leaderboard.map((player, i) => {
                   const isMe = player.username === playerInfo.username;
                   return (
-                    <div key={i} className={`flex items-center justify-between p-3 rounded-lg ${isMe ? 'bg-blue-600/20 border border-blue-500/30' : 'bg-slate-950'}`}>
+                    <div key={i} className={`flex items-center justify-between p-3 rounded-lg ${isMe ? 'bg-blue-600/20 border border-blue-500/30' : 'bg-slate-950 border border-slate-800/50'}`}>
                       <div className="flex items-center gap-3">
                         <span className="text-slate-500 font-mono text-sm">#{i + 1}</span>
                         <span className={`font-medium ${isMe ? 'text-blue-400' : 'text-slate-200'}`}>
@@ -226,6 +264,7 @@ export default function App() {
               )}
             </div>
           </div>
+
         </div>
       </main>
     </div>
